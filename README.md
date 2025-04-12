@@ -44,12 +44,19 @@ The project is set up to run in a development container with all necessary depen
    go run cmd/main.go
    ```
 
-5. **Test the endpoint**:
-   ```bash
-   curl http://localhost:8080/hello
-   ```
+5. **Test the endpoints**:
    
-   You should receive a JSON response with the request and response timestamps.
+   - Test the hello endpoint:
+     ```bash
+     curl http://localhost:8080/hello
+     ```
+     You should receive a JSON response with the request and response timestamps.
+   
+   - Test the add endpoint:
+     ```bash
+     curl "http://localhost:8080/add?val=5&val=10&val=15"
+     ```
+     You should receive a JSON response with the sum of the provided values and timestamps.
 
 ## Using VS Code Debugging
 
@@ -70,7 +77,7 @@ Environment variables are configured in `.devcontainer/.env`:
 ## Architecture
 
 1. **Client Flow**:
-   - Client receives an HTTP request on `/hello`
+   - Client receives an HTTP request on `/hello` or `/add`
    - Creates a JSON message with current timestamp and request type
    - Publishes to RabbitMQ with a correlation ID and reply queue
    - Waits for a response on its callback queue
@@ -83,21 +90,52 @@ Environment variables are configured in `.devcontainer/.env`:
    - Publishes the response back to the client's reply queue
    - Uses the correlation ID to ensure the response matches the request
 
+## Available Endpoints
+
+### `/hello` Endpoint
+
+A simple endpoint that demonstrates basic RPC functionality with timestamp tracking.
+
+### `/add` Endpoint
+
+An endpoint that accepts multiple integer values and returns their sum, demonstrating more complex request/response structures.
+
+- **Request**: Pass integer values using the `val` query parameter (can be specified multiple times)
+- **Example**: `curl "http://localhost:8080/add?val=5&val=10&val=15"`
+
 ## Message Structure
 
-### Request
+### Hello Request
 ```json
 {
   "sentAt": "2025-04-12T12:34:56Z"
 }
 ```
 
-### Response
+### Hello Response
 ```json
 {
   "sentAt": "2025-04-12T12:34:56Z",
   "receivedAt": "2025-04-12T12:34:57Z",
   "respondedAt": "2025-04-12T12:34:57Z"
+}
+```
+
+### Add Request
+```json
+{
+  "sentAt": "2025-04-12T12:34:56Z",
+  "values": [5, 10, 15]
+}
+```
+
+### Add Response
+```json
+{
+  "sentAt": "2025-04-12T12:34:56Z",
+  "receivedAt": "2025-04-12T12:34:57Z",
+  "respondedAt": "2025-04-12T12:34:57Z",
+  "sum": 30
 }
 ```
 

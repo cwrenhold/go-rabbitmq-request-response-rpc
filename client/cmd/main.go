@@ -8,22 +8,35 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-// Request represents the structure of our RPC request
-type Request struct {
+// RequestMetadata represents the structure of our RPC request
+type RequestMetadata struct {
 	SentAt string `json:"sentAt"`
 }
 
-// Response represents the structure of our RPC response
-type Response struct {
+// AddRequest extends the base Request for the "add" endpoint
+type AddRequest struct {
+	RequestMetadata
+	Values []int `json:"values"` // The values to be added together
+}
+
+// ResponseMetadata represents the structure of our RPC response
+type ResponseMetadata struct {
 	SentAt      string `json:"sentAt"`      // When the original request was sent
 	ReceivedAt  string `json:"receivedAt"`  // When the server received the request
 	RespondedAt string `json:"respondedAt"` // When the server sent the response
+}
+
+// AddResponse extends the base Response for the "add" endpoint
+type AddResponse struct {
+	ResponseMetadata
+	Sum int `json:"sum"` // The sum of the values
 }
 
 // RPCClient holds the client state for making RPC calls
@@ -51,6 +64,10 @@ func main() {
 
 	http.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
 		helloHandler(w, r, rpcClient)
+	})
+
+	http.HandleFunc("/add", func(w http.ResponseWriter, r *http.Request) {
+		addHandler(w, r, rpcClient)
 	})
 
 	log.Printf("Starting HTTP server on port %s", port)
@@ -222,45 +239,107 @@ func (c *RPCClient) Close() {
 	}
 }
 
-func helloHandler(w http.ResponseWriter, r *http.Request, rpcClient *RPCClient) {
+// handleRPCRequest is a generic handler for RPC requests
+// requestCreator creates the request object
+// requestType is the type of request being made
+// responseProcessor performs any post-processing of the response
+func handleRPCRequest(
+	w http.ResponseWriter,
+	r *http.Request,
+	rpcClient *RPCClient,
+	requestType string,
+	requestCreator func() (interface{}, error),
+	responseProcessor func([]byte) ([]byte, error),
+) {
 	// Create a context with timeout
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	// Prepare the request with type "hello"
-	currentTime := time.Now().Format(time.RFC3339)
-	request := Request{
-		SentAt: currentTime,
+	// Create the request
+	req, err := requestCreator()
+	if err != nil {
+		log.Printf("Failed to create request: %v", err)
+		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
 	}
 
-	jsonRequest, err := json.Marshal(request)
+	// Marshal request to JSON
+	jsonRequest, err := json.Marshal(req)
 	if err != nil {
 		log.Printf("Failed to marshal request to JSON: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	// Make the RPC call, specifying the request type
-	response, err := rpcClient.Call(ctx, "hello", jsonRequest)
+	// Make the RPC call
+	response, err := rpcClient.Call(ctx, requestType, jsonRequest)
 	if err != nil {
 		log.Printf("RPC call failed: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
+		http.Error(w, "RPC call failed", http.StatusInternalServerError)
 		return
 	}
 
-	// Parse JSON response
-	var parsedResponse Response
-	err = json.Unmarshal(response, &parsedResponse)
+	// Parse the response
+	processedResponse, err := responseProcessor(response)
 	if err != nil {
-		log.Printf("Failed to unmarshal response JSON: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
+		log.Printf("Failed to process response: %v", err)
+		http.Error(w, "Failed to parse response", http.StatusInternalServerError)
 		return
 	}
 
 	// Return the response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(response)
+	w.Write(processedResponse)
+}
+
+func helloHandler(w http.ResponseWriter, r *http.Request, rpcClient *RPCClient) {
+	handleRPCRequest(w, r, rpcClient, "hello",
+		// Request creator function
+		func() (interface{}, error) {
+			currentTime := time.Now().Format(time.RFC3339)
+			return RequestMetadata{SentAt: currentTime}, nil
+		},
+		// Response parser function
+		func(response []byte) ([]byte, error) {
+			return response, nil
+		})
+}
+
+// addHandler processes requests to the /add endpoint
+func addHandler(w http.ResponseWriter, r *http.Request, rpcClient *RPCClient) {
+	handleRPCRequest(w, r, rpcClient, "add",
+		// Request creator function
+		func() (interface{}, error) {
+			// Parse query parameters
+			queryValues := r.URL.Query()["val"]
+			if len(queryValues) == 0 {
+				return nil, fmt.Errorf("missing 'val' query parameter")
+			}
+
+			// Convert query parameters to integers
+			values := make([]int, 0, len(queryValues))
+			for _, valStr := range queryValues {
+				val, err := strconv.Atoi(valStr)
+				if err != nil {
+					return nil, fmt.Errorf("invalid value '%s': must be an integer", valStr)
+				}
+				values = append(values, val)
+			}
+
+			// Prepare the add request
+			currentTime := time.Now().Format(time.RFC3339)
+			return AddRequest{
+				RequestMetadata: RequestMetadata{
+					SentAt: currentTime,
+				},
+				Values: values,
+			}, nil
+		},
+		// Response parser function
+		func(response []byte) ([]byte, error) {
+			return response, nil
+		})
 }
 
 func randomString(length int) string {

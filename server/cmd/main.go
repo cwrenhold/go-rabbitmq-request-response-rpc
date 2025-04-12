@@ -13,20 +13,32 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-// Request represents the structure of our RPC request
-type Request struct {
-	SentAt string `json:"sentAt"` // When the client sent the request
+// Base request and response types
+type RequestMetadata struct {
+	SentAt string `json:"sentAt"`
 }
 
-// Response represents the structure of our RPC response
-type Response struct {
-	SentAt      string `json:"sentAt"`      // When the original request was sent
-	ReceivedAt  string `json:"receivedAt"`  // When the server received the request
-	RespondedAt string `json:"respondedAt"` // When the server sent the response
+// AddRequest extends the base Request for the "add" endpoint
+type AddRequest struct {
+	RequestMetadata
+	Values []int `json:"values"`
 }
 
-// RequestHandler is a function type for request handlers
-type RequestHandler func(context.Context, Request, string) (Response, error)
+// ResponseMetadata represents the structure of our RPC response
+type ResponseMetadata struct {
+	SentAt      string `json:"sentAt"`
+	ReceivedAt  string `json:"receivedAt"`
+	RespondedAt string `json:"respondedAt"`
+}
+
+// AddResponse extends the base Response for the "add" endpoint
+type AddResponse struct {
+	ResponseMetadata
+	Sum int `json:"sum"`
+}
+
+// RequestHandler is a function type for request handlers that receives raw message body
+type RequestHandler func(context.Context, []byte, string, string) (interface{}, error)
 
 // RequestRouter routes requests to appropriate handlers
 type RequestRouter struct {
@@ -42,6 +54,9 @@ func NewRequestRouter() *RequestRouter {
 	// Register the default hello handler
 	router.RegisterHandler("hello", handleHelloRequest)
 
+	// Register the add handler
+	router.RegisterHandler("add", handleAddRequest)
+
 	return router
 }
 
@@ -51,22 +66,59 @@ func (r *RequestRouter) RegisterHandler(requestType string, handler RequestHandl
 }
 
 // RouteRequest routes a request to the appropriate handler
-func (r *RequestRouter) RouteRequest(ctx context.Context, requestType string, req Request, receivedTime string) (Response, error) {
+func (r *RequestRouter) RouteRequest(ctx context.Context, requestType string, body []byte, receivedTime string) (interface{}, error) {
 	handler, exists := r.handlers[requestType]
 	if !exists {
-		return Response{}, fmt.Errorf("no handler registered for request type: %s", requestType)
+		return nil, fmt.Errorf("no handler registered for request type: %s", requestType)
 	}
 
-	return handler(ctx, req, receivedTime)
+	return handler(ctx, body, requestType, receivedTime)
+}
+
+func buildMetadata(sentAt, receivedAt string) ResponseMetadata {
+	return buildMetadataWithRespondedAt(sentAt, receivedAt, time.Now().Format(time.RFC3339))
+}
+
+func buildMetadataWithRespondedAt(sentAt, receivedAt, respondedAt string) ResponseMetadata {
+	return ResponseMetadata{
+		SentAt:      sentAt,
+		ReceivedAt:  receivedAt,
+		RespondedAt: respondedAt,
+	}
 }
 
 // handleHelloRequest is the handler for "hello" type requests
-func handleHelloRequest(ctx context.Context, req Request, receivedTime string) (Response, error) {
+func handleHelloRequest(ctx context.Context, body []byte, requestType string, receivedTime string) (interface{}, error) {
+	// Parse the request body
+	var req RequestMetadata
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal hello request: %v", err)
+	}
+
 	// The hello handler simply echoes back with timestamps
-	return Response{
-		SentAt:      req.SentAt,
-		ReceivedAt:  receivedTime,
-		RespondedAt: time.Now().Format(time.RFC3339),
+	return buildMetadata(req.SentAt, receivedTime), nil
+}
+
+// handleAddRequest is the handler for "add" type requests
+func handleAddRequest(ctx context.Context, body []byte, requestType string, receivedTime string) (interface{}, error) {
+	// Parse the request body directly to an AddRequest
+	var addReq AddRequest
+	if err := json.Unmarshal(body, &addReq); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal add request: %v", err)
+	}
+
+	// Calculate the sum
+	sum := 0
+	for _, val := range addReq.Values {
+		sum += val
+	}
+
+	log.Printf("Calculated sum of %d values: %d", len(addReq.Values), sum)
+
+	// Create and return the response with the sum
+	return AddResponse{
+		ResponseMetadata: buildMetadata(addReq.SentAt, receivedTime),
+		Sum:              sum,
 	}, nil
 }
 
@@ -172,18 +224,9 @@ func main() {
 
 			log.Printf("Received request of type '%s' with correlation ID: %s", requestType, d.CorrelationId)
 
-			// Parse the JSON request
-			var request Request
-			err := json.Unmarshal(d.Body, &request)
-			if err != nil {
-				log.Printf("Error parsing request JSON: %v", err)
-				d.Nack(false, false) // Reject the message without requeue
-				cancel()
-				continue
-			}
-
 			// Route the request to the appropriate handler
-			response, err := router.RouteRequest(ctx, requestType, request, receivedTime)
+			// Pass the raw message body to let the handler do the unmarshalling
+			response, err := router.RouteRequest(ctx, requestType, d.Body, receivedTime)
 			if err != nil {
 				log.Printf("Error handling request: %v", err)
 				d.Nack(false, false) // Reject the message without requeue
