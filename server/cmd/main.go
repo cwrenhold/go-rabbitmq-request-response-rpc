@@ -15,14 +15,59 @@ import (
 
 // Request represents the structure of our RPC request
 type Request struct {
-	SentAt string `json:"sentAt"`
+	SentAt string `json:"sentAt"` // When the client sent the request
 }
 
 // Response represents the structure of our RPC response
 type Response struct {
-	SentAt      string `json:"sentAt"`
-	ReceivedAt  string `json:"receivedAt"`
-	RespondedAt string `json:"respondedAt"`
+	SentAt      string `json:"sentAt"`      // When the original request was sent
+	ReceivedAt  string `json:"receivedAt"`  // When the server received the request
+	RespondedAt string `json:"respondedAt"` // When the server sent the response
+}
+
+// RequestHandler is a function type for request handlers
+type RequestHandler func(context.Context, Request, string) (Response, error)
+
+// RequestRouter routes requests to appropriate handlers
+type RequestRouter struct {
+	handlers map[string]RequestHandler
+}
+
+// NewRequestRouter creates a new router with default handlers
+func NewRequestRouter() *RequestRouter {
+	router := &RequestRouter{
+		handlers: make(map[string]RequestHandler),
+	}
+
+	// Register the default hello handler
+	router.RegisterHandler("hello", handleHelloRequest)
+
+	return router
+}
+
+// RegisterHandler adds a new handler for a specific request type
+func (r *RequestRouter) RegisterHandler(requestType string, handler RequestHandler) {
+	r.handlers[requestType] = handler
+}
+
+// RouteRequest routes a request to the appropriate handler
+func (r *RequestRouter) RouteRequest(ctx context.Context, requestType string, req Request, receivedTime string) (Response, error) {
+	handler, exists := r.handlers[requestType]
+	if !exists {
+		return Response{}, fmt.Errorf("no handler registered for request type: %s", requestType)
+	}
+
+	return handler(ctx, req, receivedTime)
+}
+
+// handleHelloRequest is the handler for "hello" type requests
+func handleHelloRequest(ctx context.Context, req Request, receivedTime string) (Response, error) {
+	// The hello handler simply echoes back with timestamps
+	return Response{
+		SentAt:      req.SentAt,
+		ReceivedAt:  receivedTime,
+		RespondedAt: time.Now().Format(time.RFC3339),
+	}, nil
 }
 
 func failOnError(err error, msg string) {
@@ -78,6 +123,9 @@ func main() {
 	)
 	failOnError(err, "Failed to register a consumer")
 
+	// Create a request router
+	router := NewRequestRouter()
+
 	// Create a channel to handle graceful shutdown
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, syscall.SIGINT, syscall.SIGTERM)
@@ -103,7 +151,26 @@ func main() {
 
 			// Record the received time
 			receivedTime := time.Now().Format(time.RFC3339)
-			log.Printf("Received request with correlation ID: %s, reply to: %s", d.CorrelationId, d.ReplyTo)
+
+			// Extract request type from headers - this is now the only source of truth
+			requestType := ""
+			if d.Headers != nil {
+				if typeVal, ok := d.Headers["request_type"]; ok {
+					if typeStr, ok := typeVal.(string); ok {
+						requestType = typeStr
+					}
+				}
+			}
+
+			// Check if request type is available
+			if requestType == "" {
+				log.Println("Received message with no request_type header")
+				d.Nack(false, false) // Reject the message without requeue
+				cancel()
+				continue
+			}
+
+			log.Printf("Received request of type '%s' with correlation ID: %s", requestType, d.CorrelationId)
 
 			// Parse the JSON request
 			var request Request
@@ -115,18 +182,13 @@ func main() {
 				continue
 			}
 
-			// Log the request details
-			log.Printf("Processing request sent at: %s, received at: %s", request.SentAt, receivedTime)
-
-			// Small processing delay - simulate actual work
-			time.Sleep(200 * time.Millisecond)
-
-			// Prepare response with all timestamps
-			respondedAt := time.Now().Format(time.RFC3339)
-			response := Response{
-				SentAt:      request.SentAt,
-				ReceivedAt:  receivedTime,
-				RespondedAt: respondedAt,
+			// Route the request to the appropriate handler
+			response, err := router.RouteRequest(ctx, requestType, request, receivedTime)
+			if err != nil {
+				log.Printf("Error handling request: %v", err)
+				d.Nack(false, false) // Reject the message without requeue
+				cancel()
+				continue
 			}
 
 			// Convert response to JSON
@@ -148,6 +210,9 @@ func main() {
 					ContentType:   "application/json",
 					CorrelationId: d.CorrelationId, // Use the same correlation ID from the request
 					Body:          jsonResponse,
+					Headers: amqp.Table{
+						"response_type": requestType,
+					},
 				})
 
 			cancel() // Release the context resources
@@ -160,7 +225,8 @@ func main() {
 
 			// Acknowledge the message - we've processed it successfully
 			d.Ack(false)
-			log.Printf("Sent response to queue %s with correlation ID: %s", d.ReplyTo, d.CorrelationId)
+			log.Printf("Sent '%s' response to queue %s with correlation ID: %s",
+				requestType, d.ReplyTo, d.CorrelationId)
 		}
 
 		done <- true

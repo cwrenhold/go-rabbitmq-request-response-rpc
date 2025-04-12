@@ -21,9 +21,9 @@ type Request struct {
 
 // Response represents the structure of our RPC response
 type Response struct {
-	SentAt      string `json:"sentAt"`
-	ReceivedAt  string `json:"receivedAt"`
-	RespondedAt string `json:"respondedAt"`
+	SentAt      string `json:"sentAt"`      // When the original request was sent
+	ReceivedAt  string `json:"receivedAt"`  // When the server received the request
+	RespondedAt string `json:"respondedAt"` // When the server sent the response
 }
 
 // RPCClient holds the client state for making RPC calls
@@ -132,6 +132,13 @@ func (c *RPCClient) handleResponses(msgs <-chan amqp.Delivery) {
 	for d := range msgs {
 		corrID := d.CorrelationId
 
+		// Find the type of request from the headers
+		responseType, exists := d.Headers["response_type"].(string)
+		if !exists {
+			log.Printf("Received message without request type header")
+			responseType = "unknown"
+		}
+
 		// Find the channel for this correlation ID
 		c.mutex.Lock()
 		resChan, ok := c.pending[corrID]
@@ -146,15 +153,15 @@ func (c *RPCClient) handleResponses(msgs <-chan amqp.Delivery) {
 			delete(c.pending, corrID)
 			c.mutex.Unlock()
 
-			log.Printf("Received response for correlation ID: %s", corrID)
+			log.Printf("Received '%s' response for correlation ID: %s", responseType, corrID)
 		} else {
-			log.Printf("Received message with unknown correlation ID: %s", corrID)
+			log.Printf("Received '%s' message with unknown correlation ID: %s", responseType, corrID)
 		}
 	}
 }
 
 // Call makes an RPC request and waits for a response
-func (c *RPCClient) Call(ctx context.Context, body []byte) ([]byte, error) {
+func (c *RPCClient) Call(ctx context.Context, requestType string, body []byte) ([]byte, error) {
 	// Generate a correlation ID
 	corrID := randomString(32)
 
@@ -178,6 +185,10 @@ func (c *RPCClient) Call(ctx context.Context, body []byte) ([]byte, error) {
 			CorrelationId: corrID,
 			ReplyTo:       c.replyQueue,
 			Body:          body,
+			// Add a header to indicate the request type
+			Headers: amqp.Table{
+				"request_type": requestType,
+			},
 		},
 	)
 	if err != nil {
@@ -187,7 +198,7 @@ func (c *RPCClient) Call(ctx context.Context, body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to publish message: %v", err)
 	}
 
-	log.Printf("Published request with correlation ID: %s", corrID)
+	log.Printf("Published '%s' request with correlation ID: %s", requestType, corrID)
 
 	// Wait for the response or timeout
 	select {
@@ -216,7 +227,7 @@ func helloHandler(w http.ResponseWriter, r *http.Request, rpcClient *RPCClient) 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	// Prepare the request
+	// Prepare the request with type "hello"
 	currentTime := time.Now().Format(time.RFC3339)
 	request := Request{
 		SentAt: currentTime,
@@ -229,8 +240,8 @@ func helloHandler(w http.ResponseWriter, r *http.Request, rpcClient *RPCClient) 
 		return
 	}
 
-	// Make the RPC call
-	response, err := rpcClient.Call(ctx, jsonRequest)
+	// Make the RPC call, specifying the request type
+	response, err := rpcClient.Call(ctx, "hello", jsonRequest)
 	if err != nil {
 		log.Printf("RPC call failed: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
