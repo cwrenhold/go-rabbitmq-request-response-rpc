@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -25,59 +26,198 @@ type Response struct {
 	RespondedAt string `json:"respondedAt"`
 }
 
+// RPCClient holds the client state for making RPC calls
+type RPCClient struct {
+	connection *amqp.Connection
+	channel    *amqp.Channel
+	callQueue  string
+	replyQueue string
+	mutex      sync.Mutex
+	pending    map[string]chan []byte
+}
+
 func main() {
 	port := os.Getenv("CLIENT_PORT")
 	if port == "" {
 		port = "8080" // Default to 8080 if CLIENT_PORT is not set
 	}
 
-	// RabbitMQ connection setup
-	log.Printf("Connecting to RabbitMQ on %s:%s as %s", os.Getenv("RABBITMQ_HOSTNAME"), os.Getenv("RABBITMQ_PORT"), os.Getenv("RABBITMQ_USER"))
-	rabbitMQURL := fmt.Sprintf("amqp://%s:%s@%s:%s/", os.Getenv("RABBITMQ_USER"), os.Getenv("RABBITMQ_PASSWORD"), os.Getenv("RABBITMQ_HOSTNAME"), os.Getenv("RABBITMQ_PORT"))
-	conn, err := amqp.Dial(rabbitMQURL)
+	// Initialize RPC client
+	rpcClient, err := NewRPCClient()
 	if err != nil {
-		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
+		log.Fatalf("Failed to initialize RPC client: %v", err)
 	}
-	defer conn.Close()
-
-	ch, err := conn.Channel()
-	if err != nil {
-		log.Fatalf("Failed to open a channel: %v", err)
-	}
-	defer ch.Close()
+	defer rpcClient.Close()
 
 	http.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
-		helloHandler(w, r, ch)
+		helloHandler(w, r, rpcClient)
 	})
 
 	log.Printf("Starting HTTP server on port %s", port)
 	http.ListenAndServe(":"+port, nil)
 }
 
-func helloHandler(w http.ResponseWriter, r *http.Request, ch *amqp.Channel) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
+// NewRPCClient creates and initializes a new RPC client
+func NewRPCClient() (*RPCClient, error) {
+	// RabbitMQ connection setup
+	log.Printf("Connecting to RabbitMQ on %s:%s as %s", os.Getenv("RABBITMQ_HOSTNAME"), os.Getenv("RABBITMQ_PORT"), os.Getenv("RABBITMQ_USER"))
+	rabbitMQURL := fmt.Sprintf("amqp://%s:%s@%s:%s/",
+		os.Getenv("RABBITMQ_USER"),
+		os.Getenv("RABBITMQ_PASSWORD"),
+		os.Getenv("RABBITMQ_HOSTNAME"),
+		os.Getenv("RABBITMQ_PORT"))
 
-	// Create a unique reply queue for this request
+	conn, err := amqp.Dial(rabbitMQURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to RabbitMQ: %v", err)
+	}
+
+	ch, err := conn.Channel()
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to open a channel: %v", err)
+	}
+
+	// Declare the queue we'll send RPC requests to
+	callQueue := "rpc_queue"
+
+	// Declare a reply queue for all responses (exclusive to this connection)
 	replyQ, err := ch.QueueDeclare(
-		"",    // name (empty = let server generate a unique name)
+		"",    // name (let server generate a unique name)
 		false, // durable
-		true,  // delete when unused (auto-delete)
-		true,  // exclusive (only used by this connection)
+		true,  // delete when unused
+		true,  // exclusive (used only by this connection)
 		false, // no-wait
 		nil,   // arguments
 	)
 	if err != nil {
-		log.Printf("Failed to declare reply queue: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		ch.Close()
+		conn.Close()
+		return nil, fmt.Errorf("failed to declare reply queue: %v", err)
 	}
 
-	// Generate a correlation ID for this request
-	corrID := randomString(32)
-	currentTime := time.Now().Format(time.RFC3339)
+	// Initialize the client
+	rpcClient := &RPCClient{
+		connection: conn,
+		channel:    ch,
+		callQueue:  callQueue,
+		replyQueue: replyQ.Name,
+		pending:    make(map[string]chan []byte),
+	}
 
-	// Create request message as JSON
+	// Start consuming from the reply queue
+	msgs, err := ch.Consume(
+		replyQ.Name, // queue
+		"",          // consumer
+		true,        // auto-ack
+		false,       // exclusive
+		false,       // no-local
+		false,       // no-wait
+		nil,         // args
+	)
+	if err != nil {
+		rpcClient.Close()
+		return nil, fmt.Errorf("failed to consume from reply queue: %v", err)
+	}
+
+	// Handle incoming messages in a separate goroutine
+	go rpcClient.handleResponses(msgs)
+
+	log.Printf("RPC client initialized with reply queue: %s", replyQ.Name)
+	return rpcClient, nil
+}
+
+// handleResponses processes responses coming in on the reply queue
+func (c *RPCClient) handleResponses(msgs <-chan amqp.Delivery) {
+	for d := range msgs {
+		corrID := d.CorrelationId
+
+		// Find the channel for this correlation ID
+		c.mutex.Lock()
+		resChan, ok := c.pending[corrID]
+		c.mutex.Unlock()
+
+		if ok {
+			// Pass the response to the waiting goroutine
+			resChan <- d.Body
+
+			// Clean up once we've delivered the response
+			c.mutex.Lock()
+			delete(c.pending, corrID)
+			c.mutex.Unlock()
+
+			log.Printf("Received response for correlation ID: %s", corrID)
+		} else {
+			log.Printf("Received message with unknown correlation ID: %s", corrID)
+		}
+	}
+}
+
+// Call makes an RPC request and waits for a response
+func (c *RPCClient) Call(ctx context.Context, body []byte) ([]byte, error) {
+	// Generate a correlation ID
+	corrID := randomString(32)
+
+	// Create a channel to receive the response
+	resChan := make(chan []byte)
+
+	// Register this correlation ID
+	c.mutex.Lock()
+	c.pending[corrID] = resChan
+	c.mutex.Unlock()
+
+	// Publish the message with our correlation ID and reply queue
+	err := c.channel.PublishWithContext(
+		ctx,
+		"",          // exchange
+		c.callQueue, // routing key
+		false,       // mandatory
+		false,       // immediate
+		amqp.Publishing{
+			ContentType:   "application/json",
+			CorrelationId: corrID,
+			ReplyTo:       c.replyQueue,
+			Body:          body,
+		},
+	)
+	if err != nil {
+		c.mutex.Lock()
+		delete(c.pending, corrID)
+		c.mutex.Unlock()
+		return nil, fmt.Errorf("failed to publish message: %v", err)
+	}
+
+	log.Printf("Published request with correlation ID: %s", corrID)
+
+	// Wait for the response or timeout
+	select {
+	case res := <-resChan:
+		return res, nil
+	case <-ctx.Done():
+		c.mutex.Lock()
+		delete(c.pending, corrID)
+		c.mutex.Unlock()
+		return nil, fmt.Errorf("request timed out")
+	}
+}
+
+// Close closes the RPC client
+func (c *RPCClient) Close() {
+	if c.channel != nil {
+		c.channel.Close()
+	}
+	if c.connection != nil {
+		c.connection.Close()
+	}
+}
+
+func helloHandler(w http.ResponseWriter, r *http.Request, rpcClient *RPCClient) {
+	// Create a context with timeout
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	// Prepare the request
+	currentTime := time.Now().Format(time.RFC3339)
 	request := Request{
 		SentAt: currentTime,
 	}
@@ -89,91 +229,27 @@ func helloHandler(w http.ResponseWriter, r *http.Request, ch *amqp.Channel) {
 		return
 	}
 
-	// Create a consumer for the reply queue BEFORE publishing the request
-	msgs, err := ch.Consume(
-		replyQ.Name, // queue
-		"",          // consumer tag (empty = let server generate)
-		true,        // auto-ack
-		false,       // exclusive
-		false,       // no-local
-		false,       // no-wait
-		nil,         // args
-	)
+	// Make the RPC call
+	response, err := rpcClient.Call(ctx, jsonRequest)
 	if err != nil {
-		log.Printf("Failed to register a consumer: %v", err)
+		log.Printf("RPC call failed: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	// Publish message to RabbitMQ
-	log.Printf("Publishing request (%s) to RabbitMQ: %s", corrID, string(jsonRequest))
-	err = ch.PublishWithContext(
-		ctx,
-		"",          // exchange
-		"rpc_queue", // routing key (queue name)
-		false,       // mandatory
-		false,       // immediate
-		amqp.Publishing{
-			ContentType:   "application/json",
-			CorrelationId: corrID,
-			ReplyTo:       replyQ.Name, // Use our unique reply queue
-			Body:          jsonRequest,
-		},
-	)
+	// Parse JSON response
+	var parsedResponse Response
+	err = json.Unmarshal(response, &parsedResponse)
 	if err != nil {
-		log.Printf("Failed to publish a message: %v", err)
+		log.Printf("Failed to unmarshal response JSON: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	// Create a channel to signal when we're done processing messages
-	done := make(chan struct{})
-
-	// Create a response channel to get our result
-	responseChan := make(chan []byte)
-
-	// Start a goroutine to consume from our reply queue
-	go func() {
-		for d := range msgs {
-			if d.CorrelationId == corrID {
-				log.Printf("Received response for correlation ID %s", corrID)
-				responseChan <- d.Body
-				done <- struct{}{} // Signal that we're done
-				return
-			} else {
-				log.Printf("Received message with wrong correlation ID: expected %s, got %s", corrID, d.CorrelationId)
-			}
-		}
-	}()
-
-	// Wait for either response or timeout
-	select {
-	case responseBody := <-responseChan:
-		// Parse JSON response
-		var response Response
-		err := json.Unmarshal(responseBody, &response)
-		if err != nil {
-			log.Printf("Failed to unmarshal response JSON: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		// Set content type to JSON and return the full JSON response
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write(responseBody)
-		log.Printf("Successfully processed RPC request with correlation ID %s", corrID)
-
-		// Ensure we close our goroutine
-		<-done
-		return
-
-	case <-ctx.Done():
-		log.Printf("Request timed out for correlation ID %s", corrID)
-		w.WriteHeader(http.StatusGatewayTimeout)
-		w.Write([]byte(`{"error": "Request timed out"}`))
-		return
-	}
+	// Return the response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(response)
 }
 
 func randomString(length int) string {
