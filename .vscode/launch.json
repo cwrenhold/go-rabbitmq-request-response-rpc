@@ -1,0 +1,23 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Launch Client",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/client/cmd",
+      "envFile": "${workspaceFolder}/.devcontainer/.env",
+      "args": []
+    },
+    {
+      "name": "Launch Server",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/server/cmd",
+      "envFile": "${workspaceFolder}/.devcontainer/.env",
+      "args": []
+    }
+  ]
+}
