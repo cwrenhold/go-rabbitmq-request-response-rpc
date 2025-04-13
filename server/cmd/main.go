@@ -14,6 +14,9 @@ func NewRequestRouter() *rpc.RequestRouter {
 	// Register the default hello handler
 	router.RegisterHandler("hello", handlers.HandleHelloRequest)
 
+	// Register the hello_sql handler
+	router.RegisterHandler("hello_sql", handlers.HandleHelloSqlRequest)
+
 	// Register the add handler
 	router.RegisterHandler("add", handlers.HandleAddRequest)
 

@@ -1,8 +1,9 @@
 package handlers
 
 import (
-	"server/responses"
 	"time"
+
+	"server/responses"
 )
 
 func buildMetadata(sentAt, receivedAt string) responses.ResponseMetadata {

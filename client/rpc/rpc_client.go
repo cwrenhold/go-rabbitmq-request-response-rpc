@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"sync"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -19,6 +20,7 @@ type RPCClient struct {
 	replyQueue string
 	mutex      sync.Mutex
 	pending    map[string]chan []byte
+	Timeout    time.Duration
 }
 
 // NewRPCClient creates and initializes a new RPC client
@@ -62,6 +64,7 @@ func NewRPCClient() (*RPCClient, error) {
 		callQueue:  callQueue,
 		replyQueue: replyQ.Name,
 		pending:    make(map[string]chan []byte),
+		Timeout:    getTimeout(),
 	}
 
 	msgs, err := ch.Consume(
@@ -166,6 +169,20 @@ func (c *RPCClient) Close() {
 	if c.connection != nil {
 		c.connection.Close()
 	}
+}
+
+func getTimeout() time.Duration {
+	// Load the request timeout from environment variable
+	timeoutRaw := os.Getenv("CLIENT_REQUEST_TIMEOUT")
+
+	// Parse the timeout value from the environment variable to an integer, defaulting to 10 seconds in milliseconds
+	timeout, err := time.ParseDuration(timeoutRaw)
+	if err != nil {
+		log.Printf("Invalid timeout value, using default: %v", err)
+		timeout = 10 * time.Second
+	}
+
+	return timeout
 }
 
 func randomString(length int) string {

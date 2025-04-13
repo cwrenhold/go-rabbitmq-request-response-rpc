@@ -7,9 +7,16 @@ import (
 	"net/http"
 	"time"
 
-	"client/responses"
+	"client/requests"
 	"client/rpc"
 )
+
+func buildRequestMetadata() requests.RequestMetadata {
+	currentTime := time.Now().Format(time.RFC3339)
+	return requests.RequestMetadata{
+		SentAt: currentTime,
+	}
+}
 
 func handleRPCRequest(
 	w http.ResponseWriter,
@@ -19,7 +26,7 @@ func handleRPCRequest(
 	requestCreator func() (interface{}, error),
 	responseProcessor func([]byte) ([]byte, error),
 ) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), rpcClient.Timeout)
 	defer cancel()
 
 	req, err := requestCreator()
@@ -49,15 +56,6 @@ func handleRPCRequest(
 		http.Error(w, "Failed to parse response", http.StatusInternalServerError)
 		return
 	}
-
-	// Example usage of responses package
-	currentTime := time.Now().Format(time.RFC3339)
-	responseMetadata := responses.ResponseMetadata{
-		SentAt:      currentTime,
-		ReceivedAt:  currentTime,
-		RespondedAt: currentTime,
-	}
-	log.Printf("Response metadata: %+v", responseMetadata)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

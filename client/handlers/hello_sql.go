@@ -6,8 +6,8 @@ import (
 	"client/rpc"
 )
 
-func HelloHandler(w http.ResponseWriter, r *http.Request, rpcClient *rpc.RPCClient) {
-	handleRPCRequest(w, r, rpcClient, "hello",
+func HelloSQLHandler(w http.ResponseWriter, r *http.Request, rpcClient *rpc.RPCClient) {
+	handleRPCRequest(w, r, rpcClient, "hello_sql",
 		func() (interface{}, error) {
 			return buildRequestMetadata(), nil
 		},

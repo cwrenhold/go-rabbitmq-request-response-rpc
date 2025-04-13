@@ -1,12 +1,12 @@
 package handlers
 
 import (
-	"client/requests"
-	"client/rpc"
 	"fmt"
 	"net/http"
 	"strconv"
-	"time"
+
+	"client/requests"
+	"client/rpc"
 )
 
 func AddHandler(w http.ResponseWriter, r *http.Request, rpcClient *rpc.RPCClient) {
@@ -26,12 +26,9 @@ func AddHandler(w http.ResponseWriter, r *http.Request, rpcClient *rpc.RPCClient
 				values = append(values, val)
 			}
 
-			currentTime := time.Now().Format(time.RFC3339)
 			return requests.AddRequest{
-				RequestMetadata: requests.RequestMetadata{
-					SentAt: currentTime,
-				},
-				Values: values,
+				RequestMetadata: buildRequestMetadata(),
+				Values:          values,
 			}, nil
 		},
 		func(response []byte) ([]byte, error) {

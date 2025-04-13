@@ -26,6 +26,10 @@ func main() {
 		handlers.HelloHandler(w, r, rpcClient)
 	})
 
+	http.HandleFunc("/hello_sql", func(w http.ResponseWriter, r *http.Request) {
+		handlers.HelloSQLHandler(w, r, rpcClient)
+	})
+
 	http.HandleFunc("/add", func(w http.ResponseWriter, r *http.Request) {
 		handlers.AddHandler(w, r, rpcClient)
 	})
