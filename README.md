@@ -96,12 +96,23 @@ Environment variables are configured in `.devcontainer/.env`:
 
 A simple endpoint that demonstrates basic RPC functionality with timestamp tracking.
 
+- **Request**: No parameters required
+- **Example**: `curl http://localhost:8080/hello`
+
 ### `/add` Endpoint
 
 An endpoint that accepts multiple integer values and returns their sum, demonstrating more complex request/response structures.
 
 - **Request**: Pass integer values using the `val` query parameter (can be specified multiple times)
 - **Example**: `curl "http://localhost:8080/add?val=5&val=10&val=15"`
+
+### `/hello_sql` Endpoint
+
+An endpoint that demonstrates interaction with a SQL database. It performs a simple query and returns the result along with timestamps.    
+*Note: This endpoint does not return anything from the database, only checks if the connection is successful.*
+
+- **Request**: No parameters required
+- **Example**: `curl http://localhost:8080/hello_sql`
 
 ## Message Structure
 
